@@ -1,0 +1,78 @@
+name: Deploy to Staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: 'Docker image to deploy (ghcr.io/owner/rifa1122:tag)'
+        required: false
+        default: 'ghcr.io/nduplat/rifa1122:latest'
+  push:
+    branches:
+      - staging
+
+# Simple SSH-based deploy: pulls image and runs container (or replaces existing)
+# Required secrets (set in repo Settings → Secrets and variables → Actions):
+# - STAGING_SSH_HOST: host or IP (e.g. 1.2.3.4)
+# - STAGING_SSH_USER: user to ssh as (e.g. ubuntu)
+# - STAGING_SSH_PRIVATE_KEY: private key content (no passphrase) - as secret
+# Optional secrets:
+# - STAGING_DOCKER_CONTAINER_NAME (default: rifa1122)
+# - STAGING_DEPLOY_PORT (default: 8000)
+
+permissions: {}
+
+jobs:
+  deploy:
+    name: Deploy to staging (ssh + docker pull + restart)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install ssh client
+        run: sudo apt-get update && sudo apt-get install -y openssh-client
+
+      - name: Start ssh agent with private key
+        uses: webfactory/ssh-agent@v0.8.1
+        with:
+          ssh-private-key: ${{ secrets.STAGING_SSH_PRIVATE_KEY }}
+
+      - name: Add remote to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.STAGING_SSH_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Pull image and restart container on remote
+        env:
+          IMAGE: ${{ github.event.inputs.image || 'ghcr.io/nduplat/rifa1122:latest' }}
+          SSH_USER: ${{ secrets.STAGING_SSH_USER }}
+          SSH_HOST: ${{ secrets.STAGING_SSH_HOST }}
+          CONTAINER_NAME: ${{ secrets.STAGING_DOCKER_CONTAINER_NAME || 'rifa1122' }}
+          PORT: ${{ secrets.STAGING_DEPLOY_PORT || '8000' }}
+        run: |
+          set -euo pipefail
+
+          echo "Deploying image: $IMAGE to $SSH_USER@$SSH_HOST (container: $CONTAINER_NAME)"
+
+          ssh -o StrictHostKeyChecking=yes ${SSH_USER}@${SSH_HOST} <<EOF
+            set -euo pipefail
+            echo "Remote: docker version"
+            docker --version || true
+            echo "Pulling image: ${IMAGE}"
+            docker pull "${IMAGE}"
+
+            # If container exists and is running, stop and remove it
+            if docker ps -q -f name="${CONTAINER_NAME}" | grep -q .; then
+              echo "Stopping and removing existing container ${CONTAINER_NAME}"
+              docker stop "${CONTAINER_NAME}" || true
+              docker rm "${CONTAINER_NAME}" || true
+            fi
+
+            # Run the container (adjust flags as needed)
+            echo "Starting container ${CONTAINER_NAME}"
+            docker run -d --restart=always -p ${PORT}:8000 --name "${CONTAINER_NAME}" "${IMAGE}"
+
+            echo "Finished deploy of ${IMAGE}"
+          EOF
